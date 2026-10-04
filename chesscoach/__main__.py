@@ -3,14 +3,16 @@
     python -m chesscoach fetch --chesscom <user> --lichess <user> --months 6
     python -m chesscoach analyze --depth 14 --limit 50
     python -m chesscoach report [--json]
+    python -m chesscoach coach [--provider anthropic|openai|gemini|ollama|... --model M]
 """
 import argparse
 import json
+import sys
 import time
 
 import chess.engine
 
-from . import analyze, fetch, report, storage
+from . import analyze, coach, fetch, report, storage
 from .config import stockfish_path
 
 
@@ -51,6 +53,23 @@ def cmd_report(args) -> None:
     print(json.dumps(data, indent=2) if args.json else report.format_report(data))
 
 
+def cmd_coach(args) -> None:
+    data = report.build_report(storage.connect())
+    if not data["overview"]["games"]:
+        print("No analyzed games yet. Run `fetch` and `analyze` first.")
+        return
+    try:
+        # LLMs emit emoji etc.; Windows pipes/redirects default to cp1252 and would crash.
+        sys.stdout.reconfigure(encoding="utf-8")
+        provider, model, base_url = coach.resolve(args.provider, args.model, args.base_url)
+        print(f"Coaching with {provider} / {model} (may take a minute)...\n", file=sys.stderr)
+        for text in coach.stream_coaching(data, provider, model, base_url):
+            print(text, end="", flush=True)
+        print()
+    except coach.CoachError as e:
+        raise SystemExit(f"\ncoach: {e}") from None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="chesscoach")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -72,6 +91,13 @@ def main() -> None:
     p = sub.add_parser("report", help="summarize recurring mistakes")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("coach", help="get an LLM-written training plan from the report")
+    p.add_argument("--provider", choices=coach.PROVIDERS,
+                   help=f"LLM provider (default ${{CHESSCOACH_LLM_PROVIDER}} or {coach.DEFAULT_PROVIDER})")
+    p.add_argument("--model", help=f"model name (anthropic default: {coach.DEFAULT_ANTHROPIC_MODEL})")
+    p.add_argument("--base-url", help="OpenAI-compatible endpoint, for --provider custom")
+    p.set_defaults(func=cmd_coach)
 
     args = parser.parse_args()
     args.func(args)

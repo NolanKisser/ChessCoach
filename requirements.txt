@@ -1,3 +1,7 @@
 chess>=1.11
 requests>=2.31
 pytest>=8
+# LLM coach: anthropic for Claude; openai for OpenAI and OpenAI-compatible providers
+# (Gemini, Ollama, OpenRouter, Groq, ...). Only the one you use is needed.
+anthropic>=1.11
+openai>=3.24

@@ -29,6 +29,7 @@ Then point it at your own account(s) — either or both:
 python -m chesscoach fetch --chesscom YOUR_CHESSCOM_NAME --lichess YOUR_LICHESS_NAME --months 6
 python -m chesscoach analyze --depth 14 --limit 50   # resumable; rerun to analyze more games
 python -m chesscoach report                          # or --json for machine-readable output
+python -m chesscoach coach                           # LLM-written training plan (see below)
 ```
 
 Analysis is the slow part (Stockfish evaluates every position); `--limit` lets you do it
@@ -45,6 +46,26 @@ in batches, and re-running `analyze` picks up where it left off.
 Your games and analysis stay on your machine in `data/chesscoach.db` (SQLite, gitignored): a
 `games` table and a per-ply `moves` table with evals, best move, centipawn loss, win% drop,
 classification, phase, and clock.
+
+## LLM coach
+
+`coach` sends the report to an LLM and streams back a personalized training plan: top
+priorities with practice tasks, openings to fix, and your worst positions to review. Bring
+your own model. Any of these work:
+
+| Provider | Example | Key |
+|---|---|---|
+| `anthropic` (default) | `coach` (uses `claude-opus-5-5`) | `ANTHROPIC_API_KEY` |
+| `openai` | `coach --provider openai --model <model>` | `OPENAI_API_KEY` |
+| `gemini` | `coach --provider gemini --model <model>` | `GEMINI_API_KEY` |
+| `openrouter` | `coach --provider openrouter --model <vendor/model>` | `OPENROUTER_API_KEY` |
+| `groq`, `mistral`, `deepseek`, `xai` | `coach --provider groq --model <model>` | `GROQ_API_KEY`, ... |
+| `ollama` (free, local) | `coach --provider ollama --model <model>` | none: run `ollama pull <model>` first |
+| `custom` (any OpenAI-compatible server, e.g. LM Studio, vLLM) | `coach --provider custom --base-url http://localhost:1234/v1 --model <model>` | `CHESSCOACH_LLM_API_KEY` if needed |
+
+Set `CHESSCOACH_LLM_PROVIDER` / `CHESSCOACH_LLM_MODEL` / `CHESSCOACH_LLM_BASE_URL` to avoid
+repeating flags. Save a plan with `coach > plan.md`. Only the report summary is sent to
+the provider: aggregate stats, opening names, your worst positions, and links to those games.
 
 ## How moves are classified
 
@@ -65,12 +86,11 @@ Tests are pure unit tests — no network or Stockfish required. Issues and pull 
 
 ## Roadmap
 
-ChessCoach is currently a command-line tool. Available today: fetch, Stockfish analysis, and the
-pattern report.
+ChessCoach is currently a command-line tool. Available today: fetch, Stockfish analysis, the
+pattern report, and the LLM coach.
 
 Planned (not built yet):
 
-- LLM coach (Ollama or Claude API) that explains `report --json` and specific positions
 - Motif tagging: hung pieces, missed forks/mates, back-rank issues
 - Puzzle trainer generated from your own blunders
 - Web UI (FastAPI + board view)

@@ -16,6 +16,7 @@ python -m pytest tests/test_analyze.py::test_classify_thresholds   # single test
 python -m chesscoach fetch --chesscom <user> --lichess <user> --months 6 [--max N]
 python -m chesscoach analyze --depth 14 --limit 50 [--threads 4 --hash 256]
 python -m chesscoach report [--json]
+python -m chesscoach coach [--provider anthropic|ollama|openai|gemini|... --model M --base-url URL]
 ```
 
 No linter/formatter is configured. Tests are pure unit tests (no network, no Stockfish) — keep them that way by testing the normalize/classify helpers rather than the fetch/engine paths.
@@ -28,14 +29,15 @@ No linter/formatter is configured. Tests are pure unit tests (no network, no Sto
 
 ## Architecture
 
-Three-stage pipeline, each stage a CLI subcommand in `chesscoach/__main__.py`, with SQLite (`storage.py`) as the hand-off between stages:
+Pipeline of CLI subcommands a CLI subcommand in `chesscoach/__main__.py`, with SQLite (`storage.py`) as the hand-off between stages:
 
 1. **fetch** (`fetch.py`) — Chess.com PubAPI (monthly archives) and Lichess (NDJSON stream with `pgnInJson`, clocks, openings). Each source has a `normalize_*` function that maps to a common game dict whose keys are exactly `storage.GAME_COLUMNS`. Game IDs are prefixed `chesscom:` / `lichess:`. `result` is always from the *user's* perspective (win/draw/loss). Requests are serial with 429 backoff (Lichess wants a 60s wait). `upsert_games` uses `INSERT OR IGNORE`, so re-fetching never clobbers existing games or their analysis.
 2. **analyze** (`analyze.py`) — resumable: only games with `analyzed_depth IS NULL` are processed, and `save_analysis` replaces that game's `moves` rows and sets `analyzed_depth`. Per ply it stores white-POV evals (clipped to ±1000cp; mate = ±100000 before clipping), converts to the mover's POV, then computes `cp_loss` and `win_drop` via Lichess's win% curve. If the played move equals the engine's best move, loss is forced to 0 (avoids depth-noise false positives). Classification thresholds on win% drop: 5/10/15 → inaccuracy/mistake/blunder. Phase: endgame if combined non-pawn material ≤ 26, else opening through fullmove 12, else middlegame.
 3. **report** (`report.py`) — SQL aggregations over `is_user = 1` moves: overview, per-phase, per-opening (grouped by opening name + color, min 3 games, ranked by `priority` = loss rate + how early/often the first mistake-or-blunder lands, via an exponential decay with an 8-move half-life), time trouble (clock < 30s), worst blunders. `build_report` returns plain JSON-serializable dicts deliberately — `report --json` is the intended input for the planned LLM coaching layer; `format_report` is just the CLI rendering.
+4. **coach** (`coach.py`) — sends `build_report` output (top openings only, compact JSON) to an LLM and streams a Markdown training plan. Three adapters: Anthropic SDK (default `claude-opus-5-5`, with server-side refusal fallbacks), Ollama's native `/api/chat` (its OpenAI-compatible endpoint ignores `num_ctx`, and the 4096-token default is too small for prompt + reasoning), and the OpenAI SDK for every other OpenAI-compatible provider (`OPENAI_COMPATIBLE` maps name → base URL + key env var). SDKs are imported lazily. Provider/model/base URL resolve from flags → `CHESSCOACH_LLM_*` env → defaults in `coach.resolve`.
 
 Schema lives as a `CREATE TABLE IF NOT EXISTS` script in `storage.SCHEMA`, applied on every `connect()`; there are no migrations, so schema changes to existing columns require handling existing `data/chesscoach.db` files manually.
 
 ## Roadmap (from README)
 
-Next milestones: LLM coach (Ollama or Claude API) over `report --json` + specific positions; motif tagging (hung pieces, missed forks/mates, back-rank); puzzle trainer from the user's own blunders; FastAPI web UI with board view.
+Next milestones: motif tagging (hung pieces, missed forks/mates, back-rank); puzzle trainer from the user's own blunders; FastAPI web UI with board view.
