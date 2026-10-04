@@ -8,6 +8,8 @@ import statistics
 
 TIME_TROUBLE_SECONDS = 30
 MIN_OPENING_GAMES = 3
+# A first big error this many moves later counts half as much toward an opening's priority.
+EARLY_ERROR_HALF_LIFE = 8
 
 
 def _rate(count: int, total: int, per: int = 100) -> float:
@@ -57,6 +59,18 @@ def by_phase(conn: sqlite3.Connection) -> list[dict]:
     )
 
 
+def error_earliness(first_error_move: int | None) -> float:
+    """1.0 for an error on move 1, decaying toward 0 the later it comes; 0 if no error."""
+    if not first_error_move:
+        return 0.0
+    return 0.5 ** ((first_error_move - 1) / EARLY_ERROR_HALF_LIFE)
+
+
+def opening_priority(score_pct: float, early_error_score: float) -> float:
+    """Higher = study this opening first. Equal weight on losing and on erring early."""
+    return round((100 - score_pct) / 100 + early_error_score, 3)
+
+
 def by_opening(conn: sqlite3.Connection, min_games: int = MIN_OPENING_GAMES) -> list[dict]:
     games = conn.execute("""
         SELECT g.id, g.opening, g.user_color, g.result,
@@ -76,14 +90,20 @@ def by_opening(conn: sqlite3.Connection, min_games: int = MIN_OPENING_GAMES) -> 
         if len(gs) < min_games:
             continue
         score = sum(1 if g["result"] == "win" else 0.5 if g["result"] == "draw" else 0 for g in gs)
-        first_errors = [(g["first_error_ply"] + 1) // 2 for g in gs if g["first_error_ply"]]
+        score_pct = round(100 * score / len(gs), 1)
+        first_errors = [(g["first_error_ply"] + 1) // 2 if g["first_error_ply"] else None for g in gs]
+        found = [m for m in first_errors if m]
+        # Averaged over all games, so error-free games pull it down: rewards early AND frequent errors.
+        early_error_score = round(statistics.mean(error_earliness(m) for m in first_errors), 3)
         out.append({
             "opening": opening, "color": color, "games": len(gs),
-            "score_pct": round(100 * score / len(gs), 1),
+            "score_pct": score_pct,
             "acpl": round(statistics.mean(g["acpl"] for g in gs), 1),
-            "median_first_error_move": statistics.median(first_errors) if first_errors else None,
+            "median_first_error_move": statistics.median(found) if found else None,
+            "early_error_score": early_error_score,
+            "priority": opening_priority(score_pct, early_error_score),
         })
-    return sorted(out, key=lambda r: (r["score_pct"], -r["acpl"]))
+    return sorted(out, key=lambda r: (-r["priority"], -r["acpl"]))
 
 
 def time_trouble(conn: sqlite3.Connection, seconds: int = TIME_TROUBLE_SECONDS) -> dict | None:
@@ -138,10 +158,10 @@ def format_report(report: dict) -> str:
         lines.append(f"  {p['phase']:<11} ACPL {p['acpl']:>6}   blunders/100 moves {p['blunders_per_100']:>5}"
                      f"   mistakes/100 {p['mistakes_per_100']:>5}")
 
-    lines += ["", f"Openings (>= {MIN_OPENING_GAMES} games, weakest first):"]
+    lines += ["", f"Openings (>= {MIN_OPENING_GAMES} games, highest priority first):"]
     for op in report["openings"][:10]:
         first = op["median_first_error_move"]
-        lines.append(f"  {op['score_pct']:>5}%  {op['games']:>3} games  ACPL {op['acpl']:>6}  "
+        lines.append(f"  prio {op['priority']:.2f}  {op['score_pct']:>5}%  {op['games']:>3} games  ACPL {op['acpl']:>6}  "
                      f"{op['color']:<5}  {op['opening']}"
                      + (f"  (first big error ~move {first})" if first else ""))
     if not report["openings"]:
