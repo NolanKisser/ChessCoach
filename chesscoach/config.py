@@ -9,7 +9,7 @@ DB_PATH = DATA_DIR / "chesscoach.db"
 # Chess.com asks API clients to identify themselves with contact info.
 USER_AGENT = os.environ.get(
     "CHESSCOACH_USER_AGENT",
-    "ChessCoach/0.1 (personal project; set CHESSCOACH_USER_AGENT to include your contact)",
+    "ChessCoach/0.1 (+https://github.com/NolanKisser/ChessCoach)",
 )
 
 
