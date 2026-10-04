@@ -65,11 +65,15 @@ Tests are pure unit tests — no network or Stockfish required. Issues and pull 
 
 ## Roadmap
 
-1. ~~Fetch, analyze, pattern report~~
-2. LLM coach (Ollama or Claude API) over `report --json` + specific positions
-3. Motif tagging: hung pieces, missed forks/mates, back-rank issues
-4. Puzzle trainer generated from your own blunders
-5. Web UI (FastAPI + board view)
+ChessCoach is currently a command-line tool. Available today: fetch, Stockfish analysis, and the
+pattern report.
+
+Planned (not built yet):
+
+- LLM coach (Ollama or Claude API) that explains `report --json` and specific positions
+- Motif tagging: hung pieces, missed forks/mates, back-rank issues
+- Puzzle trainer generated from your own blunders
+- Web UI (FastAPI + board view)
 
 ## License
 
