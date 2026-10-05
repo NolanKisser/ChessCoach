@@ -3,17 +3,18 @@
     python -m chesscoach fetch --chesscom <user> --lichess <user> --months 6
     python -m chesscoach analyze --depth 14 --limit 50
     python -m chesscoach report [--json]
-    python -m chesscoach coach [--provider anthropic|openai|gemini|ollama|... --model M]
+    python -m chesscoach coach [--provider anthropic|openai|gemini|ollama|... --model M] [--narrate]
 """
 import argparse
 import json
+import os
 import sys
 import time
 
 import chess.engine
 
-from . import analyze, coach, fetch, report, storage
-from .config import stockfish_path
+from . import analyze, coach, fetch, narrate, report, storage
+from .config import DATA_DIR, stockfish_path
 
 
 def cmd_fetch(args) -> None:
@@ -69,16 +70,27 @@ def cmd_coach(args) -> None:
     if not data["overview"]["games"]:
         print("No analyzed games yet. Run `fetch` and `analyze` first.")
         return
+    if args.narrate and not os.environ.get("ELEVENLABS_API_KEY"):
+        raise SystemExit("narrate: Set ELEVENLABS_API_KEY to narrate the plan.")
     try:
         # LLMs emit emoji etc.; Windows pipes/redirects default to cp1252 and would crash.
         sys.stdout.reconfigure(encoding="utf-8")
         provider, model, base_url = coach.resolve(args.provider, args.model, args.base_url)
         print(f"Coaching with {provider} / {model} (may take a minute)...\n", file=sys.stderr)
+        plan = []
         for text in coach.stream_coaching(data, provider, model, base_url):
+            plan.append(text)
             print(text, end="", flush=True)
         print()
     except coach.CoachError as e:
         raise SystemExit(f"\ncoach: {e}") from None
+    if args.narrate:
+        print(f"\nNarrating with ElevenLabs to {args.narrate}...", file=sys.stderr)
+        try:
+            chars = narrate.narrate("".join(plan), args.narrate, args.voice, args.voice_model)
+        except narrate.NarrateError as e:
+            raise SystemExit(f"narrate: {e}") from None
+        print(f"Saved {args.narrate} ({chars} characters narrated).", file=sys.stderr)
 
 
 def main() -> None:
@@ -108,6 +120,11 @@ def main() -> None:
                    help=f"LLM provider (default ${{CHESSCOACH_LLM_PROVIDER}} or {coach.DEFAULT_PROVIDER})")
     p.add_argument("--model", help=f"model name (anthropic default: {coach.DEFAULT_ANTHROPIC_MODEL})")
     p.add_argument("--base-url", help="OpenAI-compatible endpoint, for --provider custom")
+    p.add_argument("--narrate", nargs="?", const=str(DATA_DIR / "coach.mp3"), metavar="MP3",
+                   help="also read the plan aloud with ElevenLabs into an MP3 "
+                        "(default path: data/coach.mp3; needs ELEVENLABS_API_KEY)")
+    p.add_argument("--voice", help="ElevenLabs voice ID (default $ELEVENLABS_VOICE_ID or a premade voice)")
+    p.add_argument("--voice-model", help=f"ElevenLabs model (default $ELEVENLABS_MODEL or {narrate.DEFAULT_MODEL})")
     p.set_defaults(func=cmd_coach)
 
     args = parser.parse_args()

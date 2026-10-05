@@ -67,6 +67,23 @@ Set `CHESSCOACH_LLM_PROVIDER` / `CHESSCOACH_LLM_MODEL` / `CHESSCOACH_LLM_BASE_UR
 repeating flags. Save a plan with `coach > plan.md`. Only the report summary is sent to
 the provider: aggregate stats, opening names, your worst positions, and links to those games.
 
+### Narrated coach (optional)
+
+Add `--narrate` to have an [ElevenLabs](https://elevenlabs.io) voice read the plan aloud. The
+text still streams to the terminal; the audio is saved as an MP3 (default `data/coach.mp3`,
+or `--narrate plan.mp3`). Before synthesis the Markdown is turned into speech-friendly text:
+links and FENs are dropped and moves are spelled out (`Nxe5` → "knight takes e5").
+
+```bash
+export ELEVENLABS_API_KEY=...        # PowerShell: $env:ELEVENLABS_API_KEY = "..."
+python -m chesscoach coach --narrate
+python -m chesscoach coach --narrate plan.mp3 --voice <voice-id> --voice-model eleven_flash_v2_5
+```
+
+`ELEVENLABS_VOICE_ID` / `ELEVENLABS_MODEL` set the defaults (a premade voice and
+`eleven_multilingual_v2`). A typical plan is 3,000-5,000 characters, which counts against
+your ElevenLabs character quota.
+
 ## How moves are classified
 
 Evals are converted to win% with Lichess's curve; a move that drops your win chance by
