@@ -31,12 +31,23 @@ def cmd_fetch(args) -> None:
 def cmd_analyze(args) -> None:
     conn = storage.connect()
     games = storage.games_to_analyze(conn, args.limit)
-    if not games:
+    backfill = storage.games_missing_mates(conn)
+    if not games and not backfill:
         print("Nothing to analyze. Run `fetch` first.")
         return
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path())
     engine.configure({"Threads": args.threads, "Hash": args.hash})
     try:
+        if backfill:
+            # Games analyzed before mate distances were stored: re-check only the positions
+            # whose eval hit the clip, since a forced mate can't hide anywhere else.
+            print(f"Finding forced mates in {len(backfill)} previously analyzed games...")
+            start = time.perf_counter()
+            for i, g in enumerate(backfill, 1):
+                positions = storage.clipped_positions(conn, g["id"], analyze.EVAL_CLIP)
+                storage.save_mates(conn, g["id"], analyze.find_mates(engine, positions, g["analyzed_depth"]))
+                if i % 50 == 0 or i == len(backfill):
+                    print(f"  [{i}/{len(backfill)}] ({time.perf_counter() - start:.0f}s)")
         for i, g in enumerate(games, 1):
             start = time.perf_counter()
             moves = analyze.analyze_game(engine, g["pgn"], g["user_color"], args.depth)

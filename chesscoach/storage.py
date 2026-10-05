@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS games (
     eco             TEXT,
     opening         TEXT,
     played_at       INTEGER,            -- unix seconds
-    analyzed_depth  INTEGER             -- NULL until analyzed
+    analyzed_depth  INTEGER,            -- NULL until analyzed
+    mates_checked   INTEGER             -- 1 once moves.mate is filled in (see analyze.find_mates)
 );
 
 CREATE TABLE IF NOT EXISTS moves (
@@ -38,6 +39,9 @@ CREATE TABLE IF NOT EXISTS moves (
     classification  TEXT,               -- inaccuracy / mistake / blunder / NULL
     phase           TEXT,               -- opening / middlegame / endgame
     clock           REAL,               -- seconds left after the move, if known
+    mate            INTEGER,            -- forced mate in N from the position before the move,
+                                        -- white POV (+N white mates, -N black mates); NULL if none
+    mate_pv         TEXT,               -- the mating line, space-separated UCI, when mate is set
     PRIMARY KEY (game_id, ply)
 );
 
@@ -51,12 +55,25 @@ GAME_COLUMNS = (
 )
 
 
+# Columns added after the first release: (table, column, type). connect() adds any that an
+# older database is missing, so existing data/chesscoach.db files keep working.
+ADDED_COLUMNS = (
+    ("games", "mates_checked", "INTEGER"),
+    ("moves", "mate", "INTEGER"),
+    ("moves", "mate_pv", "TEXT"),
+)
+
+
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    for table, column, type_ in ADDED_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_}")
     return conn
 
 
@@ -83,10 +100,33 @@ def save_analysis(conn: sqlite3.Connection, game_id: str, depth: int, moves: lis
     conn.execute("DELETE FROM moves WHERE game_id = ?", (game_id,))
     conn.executemany(
         """INSERT INTO moves (game_id, ply, color, is_user, san, best_san, fen_before,
-               eval_before, eval_after, cp_loss, win_drop, classification, phase, clock)
+               eval_before, eval_after, cp_loss, win_drop, classification, phase, clock,
+               mate, mate_pv)
            VALUES (:game_id, :ply, :color, :is_user, :san, :best_san, :fen_before,
-               :eval_before, :eval_after, :cp_loss, :win_drop, :classification, :phase, :clock)""",
+               :eval_before, :eval_after, :cp_loss, :win_drop, :classification, :phase, :clock,
+               :mate, :mate_pv)""",
         [{"game_id": game_id, **m} for m in moves],
     )
-    conn.execute("UPDATE games SET analyzed_depth = ? WHERE id = ?", (depth, game_id))
+    conn.execute("UPDATE games SET analyzed_depth = ?, mates_checked = 1 WHERE id = ?",
+                 (depth, game_id))
+    conn.commit()
+
+
+def games_missing_mates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Games analyzed before mate distances were stored."""
+    return conn.execute("SELECT id, analyzed_depth FROM games "
+                        "WHERE analyzed_depth IS NOT NULL AND mates_checked IS NULL").fetchall()
+
+
+def clipped_positions(conn: sqlite3.Connection, game_id: str, clip: int) -> list[sqlite3.Row]:
+    """Positions whose stored eval hit the clip: the only ones that can hide a forced mate."""
+    return conn.execute("SELECT ply, fen_before FROM moves WHERE game_id = ? AND ABS(eval_before) = ?",
+                        (game_id, clip)).fetchall()
+
+
+def save_mates(conn: sqlite3.Connection, game_id: str, mates: dict[int, tuple[int, str]]) -> None:
+    """mates: ply -> (white-POV mate distance, UCI line). Marks the game as checked."""
+    conn.executemany("UPDATE moves SET mate = ?, mate_pv = ? WHERE game_id = ? AND ply = ?",
+                     [(m, pv, game_id, ply) for ply, (m, pv) in mates.items()])
+    conn.execute("UPDATE games SET mates_checked = 1 WHERE id = ?", (game_id,))
     conn.commit()

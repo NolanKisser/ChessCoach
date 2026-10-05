@@ -48,6 +48,15 @@ an early number means the student leaves theory or misplays the opening itself.
 - "worst_moments" are the biggest single blunders: the move played ("san"), the engine's \
 best move ("best_san"), the position before the move ("fen_before"), and the win% lost. \
 Refer to moves by "move_number" (e.g. "move 26"), never by ply, and include the game "url".
+- "motifs" tags tactical patterns, each with a count, rate per 100 games, and its single worst \
+example. missed_mate_in_N: the student had a forced mate in N (1-3) and played a move that gave \
+it up; allowed_mate_in_N: the student's move let the opponent force mate in N; back_rank: that \
+mate ends on the student's back rank with the king boxed in by its own pieces. These mate tags \
+apply to any move. Only on mistakes/blunders: hung_piece (the move let the opponent win a \
+piece), allowed_fork, missed_capture (the best move won a piece), missed_fork. Many errors are \
+untagged (positional or deeper tactics), so treat counts as lower bounds. Judge motifs by how \
+often they happen ("count", "per_100_games") first; a rare motif with a big average drop \
+matters less.
 
 Rules:
 - Ground every claim in the numbers provided and cite them. Do not invent statistics.

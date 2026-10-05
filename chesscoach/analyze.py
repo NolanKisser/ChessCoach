@@ -1,7 +1,7 @@
 """Run Stockfish over every position in a game and classify each move."""
 import io
 import math
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import chess
 import chess.engine
@@ -47,17 +47,49 @@ def _clip(cp: int) -> int:
     return max(-EVAL_CLIP, min(EVAL_CLIP, cp))
 
 
+class Eval(NamedTuple):
+    cp: int                          # white POV, mate = +-MATE_CP
+    best: Optional[chess.Move]
+    mate: Optional[int] = None       # white POV forced mate distance in moves, if any
+    mate_pv: Optional[str] = None    # the mating line in UCI, when mate is set
+
+
+def mate_line(board: chess.Board, pv: list[chess.Move]) -> str:
+    """The PV as UCI, cut off at the checkmating move."""
+    board = board.copy(stack=False)
+    line = []
+    for move in pv:
+        line.append(move.uci())
+        board.push(move)
+        if board.is_checkmate():
+            break
+    return " ".join(line)
+
+
 def evaluate(engine: chess.engine.SimpleEngine, board: chess.Board,
-             limit: chess.engine.Limit) -> tuple[int, Optional[chess.Move]]:
-    """Return (white-POV centipawns, best move) for a position."""
+             limit: chess.engine.Limit) -> Eval:
+    """Evaluate a position: white-POV centipawns, best move, and any forced mate."""
     if board.is_checkmate():
-        return (-MATE_CP if board.turn == chess.WHITE else MATE_CP), None
+        return Eval(-MATE_CP if board.turn == chess.WHITE else MATE_CP, None)
     if board.is_game_over(claim_draw=False):
-        return 0, None
+        return Eval(0, None)
     info = engine.analyse(board, limit)
-    cp = info["score"].white().score(mate_score=MATE_CP)
-    pv = info.get("pv") or [None]
-    return cp, pv[0]
+    score = info["score"].white()
+    pv = info.get("pv") or []
+    mate = score.mate()
+    return Eval(score.score(mate_score=MATE_CP), pv[0] if pv else None,
+                mate, mate_line(board, pv) if mate else None)
+
+
+def find_mates(engine: chess.engine.SimpleEngine, positions: list, depth: int) -> dict[int, tuple[int, str]]:
+    """Re-check (ply, fen_before) positions for forced mates: ply -> (mate, mate_pv)."""
+    limit = chess.engine.Limit(depth=depth)
+    found = {}
+    for ply, fen in positions:
+        e = evaluate(engine, chess.Board(fen), limit)
+        if e.mate:
+            found[ply] = (e.mate, e.mate_pv)
+    return found
 
 
 def analyze_game(engine: chess.engine.SimpleEngine, pgn: str, user_color: str,
@@ -70,21 +102,19 @@ def analyze_game(engine: chess.engine.SimpleEngine, pgn: str, user_color: str,
 
     board = game.board()
     nodes = list(game.mainline())
-    evals, bests, snapshots = [], [], []
+    results, snapshots = [], []
     for node in nodes:
-        cp, best = evaluate(engine, board, limit)
-        evals.append(cp)
-        bests.append(best)
+        results.append(evaluate(engine, board, limit))
         snapshots.append((board.fen(), board.turn, board.san(node.move), game_phase(board)))
         board.push(node.move)
-    evals.append(evaluate(engine, board, limit)[0])
+    evals = [r.cp for r in results] + [evaluate(engine, board, limit).cp]
 
     moves = []
     for i, node in enumerate(nodes):
         fen, turn, san, phase = snapshots[i]
         sign = 1 if turn == chess.WHITE else -1
         before, after = _clip(evals[i]) * sign, _clip(evals[i + 1]) * sign
-        best = bests[i]
+        best = results[i].best
         if best is not None and best == node.move:
             cp_loss, drop = 0, 0.0
         else:
@@ -105,5 +135,7 @@ def analyze_game(engine: chess.engine.SimpleEngine, pgn: str, user_color: str,
             "classification": classify(drop),
             "phase": phase,
             "clock": node.clock(),
+            "mate": results[i].mate,
+            "mate_pv": results[i].mate_pv,
         })
     return moves

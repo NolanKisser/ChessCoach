@@ -73,6 +73,11 @@ Evals are converted to win% with Lichess's curve; a move that drops your win cha
 ≥5 / ≥10 / ≥15 points is an inaccuracy / mistake / blunder. Phase: endgame when combined
 non-pawn material ≤ 26, opening through move 12, middlegame otherwise.
 
+Moves are also tagged with tactical motifs, using the engine's best move and the opponent's best
+reply: **missed / allowed mate in 1, 2 or 3** (on any move: missing a mate in 2 while still
+winning counts) and **back-rank mate**; and, on mistakes and blunders, **hung a piece**,
+**allowed / missed a fork**, and **missed winning a piece**.
+
 Openings (with ≥ 3 games) are ranked by priority = loss rate + how early and how often your first
 mistake lands, so an opening you misplay on move 5 comes before one you misplay on move 14.
 
@@ -87,11 +92,10 @@ Tests are pure unit tests — no network or Stockfish required. Issues and pull 
 ## Roadmap
 
 ChessCoach is currently a command-line tool. Available today: fetch, Stockfish analysis, the
-pattern report, and the LLM coach.
+pattern report (with tactical motif tagging), and the LLM coach.
 
 Planned (not built yet):
 
-- Motif tagging: hung pieces, missed forks/mates, back-rank issues
 - Puzzle trainer generated from your own blunders
 - Web UI (FastAPI + board view)
 
