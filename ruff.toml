@@ -1,0 +1,5 @@
+# Lint for likely bugs only (syntax errors, undefined/unused names, bugbear); no style rules.
+target-version = "py310"
+
+[lint]
+select = ["E9", "F", "B"]

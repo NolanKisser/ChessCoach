@@ -242,7 +242,7 @@ def game_digest(conn: sqlite3.Connection, limit: int = DIGEST_GAMES) -> list[dic
         GROUP BY g.id ORDER BY g.played_at DESC LIMIT ?
     """, (TIME_TROUBLE_SECONDS, limit)).fetchall()
     rows = [dict(r) for r in reversed(rows)]
-    for r, session_game in zip(rows, session_numbers([r["played_at"] for r in rows])):
+    for r, session_game in zip(rows, session_numbers([r["played_at"] for r in rows]), strict=True):
         played, ply = r.pop("played_at"), r.pop("first_error_ply")
         when = datetime.fromtimestamp(played) if played is not None else None  # local time
         r.update({
