@@ -67,6 +67,21 @@ Set `CHESSCOACH_LLM_PROVIDER` / `CHESSCOACH_LLM_MODEL` / `CHESSCOACH_LLM_BASE_UR
 repeating flags. Save a plan with `coach > plan.md`. Only the report summary is sent to
 the provider: aggregate stats, opening names, your worst positions, and links to those games.
 
+### Ask the coach
+
+`ask` lets you question the coach about your games and habits. Besides the report, it sees a
+table of your recent games (default 200, `--games N`) with date, local hour, weekday,
+position in the playing session, time control, ratings, result, opening, error counts, first
+error move and clock. So it can answer questions the report alone can't:
+
+```bash
+python -m chesscoach ask "Do I tilt after a loss? Should I stop after 3 games?"
+python -m chesscoach ask "Am I worse at night or in bullet?" --provider ollama --model <model>
+python -m chesscoach ask          # interactive chat; empty line to quit
+```
+
+It uses the same `--provider` / `--model` / `--base-url` options and env vars as `coach`.
+
 ### Narrated coach (optional)
 
 Add `--narrate` to have an [ElevenLabs](https://elevenlabs.io) voice read the plan aloud. The

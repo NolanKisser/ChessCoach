@@ -4,6 +4,7 @@
     python -m chesscoach analyze --depth 14 --limit 50
     python -m chesscoach report [--json]
     python -m chesscoach coach [--provider anthropic|openai|gemini|ollama|... --model M] [--narrate]
+    python -m chesscoach ask ["question"] [--provider ... --model M --games N]
 """
 import argparse
 import json
@@ -93,6 +94,65 @@ def cmd_coach(args) -> None:
         print(f"Saved {args.narrate} ({chars} characters narrated).", file=sys.stderr)
 
 
+def cmd_ask(args) -> None:
+    conn = storage.connect()
+    data = report.build_report(conn)
+    if not data["overview"]["games"]:
+        print("No analyzed games yet. Run `fetch` and `analyze` first.")
+        return
+    try:
+        provider, model, base_url = coach.resolve(args.provider, args.model, args.base_url)
+    except coach.CoachError as e:
+        raise SystemExit(f"ask: {e}") from None
+    sys.stdout.reconfigure(encoding="utf-8")
+    context = coach.build_ask_context(data, report.game_digest(conn, args.games))
+    question = " ".join(args.question)
+    interactive = not question
+    if interactive:
+        print(f"Ask the coach ({provider} / {model}) about your games. "
+              "Empty line or Ctrl+C to quit.", file=sys.stderr)
+
+    messages: list[dict] = []
+    while True:
+        if interactive:
+            try:
+                question = input("\nyou> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not question or question.lower() in ("exit", "quit"):
+                return
+            print()
+        # The report and games table ride along with the first question only.
+        messages.append({"role": "user",
+                         "content": f"{context}\n\n{question}" if not messages else question})
+        reply = []
+        try:
+            for text in coach.stream_chat(coach.ASK_SYSTEM_PROMPT, messages, provider, model,
+                                          base_url, cache_context=interactive):
+                reply.append(text)
+                print(text, end="", flush=True)
+            print()
+        except coach.CoachError as e:
+            if not interactive:
+                raise SystemExit(f"\nask: {e}") from None
+            print(f"\nask: {e}", file=sys.stderr)
+            messages.pop()  # drop the unanswered question so roles keep alternating
+            continue
+        except KeyboardInterrupt:  # stop a long answer but stay in the chat
+            print("\n[interrupted]", file=sys.stderr)
+        if not interactive:
+            return
+        messages.append({"role": "assistant", "content": "".join(reply) or "(no answer)"})
+
+
+def add_llm_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--provider", choices=coach.PROVIDERS,
+                   help=f"LLM provider (default ${{CHESSCOACH_LLM_PROVIDER}} or {coach.DEFAULT_PROVIDER})")
+    p.add_argument("--model", help=f"model name (anthropic default: {coach.DEFAULT_ANTHROPIC_MODEL})")
+    p.add_argument("--base-url", help="OpenAI-compatible endpoint, for --provider custom")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="chesscoach")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -116,16 +176,21 @@ def main() -> None:
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("coach", help="get an LLM-written training plan from the report")
-    p.add_argument("--provider", choices=coach.PROVIDERS,
-                   help=f"LLM provider (default ${{CHESSCOACH_LLM_PROVIDER}} or {coach.DEFAULT_PROVIDER})")
-    p.add_argument("--model", help=f"model name (anthropic default: {coach.DEFAULT_ANTHROPIC_MODEL})")
-    p.add_argument("--base-url", help="OpenAI-compatible endpoint, for --provider custom")
+    add_llm_args(p)
     p.add_argument("--narrate", nargs="?", const=str(DATA_DIR / "coach.mp3"), metavar="MP3",
                    help="also read the plan aloud with ElevenLabs into an MP3 "
                         "(default path: data/coach.mp3; needs ELEVENLABS_API_KEY)")
     p.add_argument("--voice", help="ElevenLabs voice ID (default $ELEVENLABS_VOICE_ID or a premade voice)")
     p.add_argument("--voice-model", help=f"ElevenLabs model (default $ELEVENLABS_MODEL or {narrate.DEFAULT_MODEL})")
     p.set_defaults(func=cmd_coach)
+
+    p = sub.add_parser("ask", help="ask the coach questions about your games and habits")
+    p.add_argument("question", nargs="*",
+                   help="your question; omit it to start an interactive chat")
+    add_llm_args(p)
+    p.add_argument("--games", type=int, default=report.DIGEST_GAMES,
+                   help=f"most recent games to show the coach game by game (default {report.DIGEST_GAMES})")
+    p.set_defaults(func=cmd_ask)
 
     args = parser.parse_args()
     args.func(args)

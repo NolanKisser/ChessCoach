@@ -11,7 +11,8 @@ import os
 from collections.abc import Iterator
 
 TOP_OPENINGS = 8
-OLLAMA_NUM_CTX = 16384
+OLLAMA_NUM_CTX = 16384  # minimum; grown to fit long chats (see ollama_num_ctx)
+OLLAMA_REPLY_TOKENS = 8192  # room for reasoning + answer
 
 # OpenAI-compatible providers: base URL and the env var holding the API key (None = no key).
 OPENAI_COMPATIBLE = {
@@ -31,11 +32,8 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 # Claude models that accept output_config.effort and server-side refusal fallbacks.
 CLAUDE_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
-SYSTEM_PROMPT = """\
-You are an experienced chess coach reviewing a student's games. You receive a JSON report \
-produced by running Stockfish over the student's recent online games. Write a personalized \
-training plan from it.
-
+# How build_report's fields were computed; shared by the plan and ask prompts.
+REPORT_NOTES = """\
 How the data was computed:
 - Moves are classified by how much they drop the student's win chance (Lichess win% curve): \
 >=5 points inaccuracy, >=10 mistake, >=15 blunder. ACPL = average centipawn loss.
@@ -57,7 +55,14 @@ piece), allowed_fork, missed_capture (the best move won a piece), missed_fork. M
 untagged (positional or deeper tactics), so treat counts as lower bounds. Judge motifs by how \
 often they happen ("count", "per_100_games") first; a rare motif with a big average drop \
 matters less.
+"""
 
+SYSTEM_PROMPT = """\
+You are an experienced chess coach reviewing a student's games. You receive a JSON report \
+produced by running Stockfish over the student's recent online games. Write a personalized \
+training plan from it.
+
+""" + REPORT_NOTES + """
 Rules:
 - Ground every claim in the numbers provided and cite them. Do not invent statistics.
 - You cannot see the games beyond this data. Don't make up concrete variations; for specific \
@@ -71,6 +76,34 @@ Format (Markdown, roughly 400-700 words):
 3. **Openings to fix** - the most urgent ones, using priority and first-error move.
 4. **Positions to review** - a few of the worst moments, with the game link, what was played \
 and what the engine preferred.
+"""
+
+ASK_SYSTEM_PROMPT = """\
+You are an experienced chess coach answering a student's questions about their own games. \
+The first message holds a JSON report from running Stockfish over the student's recent online \
+games, plus a CSV table with one row per game. Answer the questions that follow.
+
+""" + REPORT_NOTES + """
+The games table (oldest first) has one row per game, from the student's side:
+- date, weekday, hour: local time the game started.
+- session_game: the game's position in a playing session (1 = first game after a break of 30+ \
+minutes, 2 = the next game, ...). Use it with result to judge tilt and fatigue.
+- time_class (bullet/blitz/rapid/daily...), color, user_rating, opponent_rating, result \
+(win/draw/loss), opening, moves (game length).
+- acpl, and counts of inaccuracies / mistakes / blunders the student made in that game.
+- first_error_move: move number of the student's first mistake or blunder (empty = none).
+- min_clock: lowest clock the student had, in seconds; low_clock_blunders: blunders with \
+under 30 seconds left. Both empty when the site gave no clock data.
+- url: link to the game; include it when pointing at a specific game.
+
+Rules:
+- Answer the question asked, directly, then show the evidence. Compute from the table \
+(group, count, compare rates) and give the numbers and sample sizes behind each claim.
+- Say when a sample is too small to conclude anything (fewer than ~10 games in a group). When \
+the data can't answer a question, say so and what data would be needed.
+- Do not invent statistics or concrete variations. You only know the data above.
+- End with one concrete practice suggestion when it follows from the answer.
+- Keep answers focused: usually 100-350 words of Markdown, more only if asked.
 """
 
 
@@ -104,21 +137,52 @@ def resolve(provider: str | None, model: str | None, base_url: str | None) -> tu
     return provider, model, base_url
 
 
+def build_ask_context(report: dict, games: list[dict], top_openings: int = TOP_OPENINGS) -> str:
+    """The first user message of an `ask` chat: the report plus one CSV row per game."""
+    data = {**report, "openings": report["openings"][:top_openings]}
+    cols = list(games[0]) if games else []
+    # CSV, not JSON: column names once instead of per game roughly halves the tokens.
+    table = "\n".join([",".join(cols), *(",".join(_csv_cell(g[c]) for c in cols) for g in games)])
+    return ("Here is my analysis report and a table of my recent games. I'll ask questions "
+            "about them.\n\n"
+            f"```json\n{json.dumps(data, separators=(',', ':'))}\n```\n\n"
+            f"Games ({len(games)}, oldest first):\n```csv\n{table}\n```")
+
+
+def _csv_cell(value) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    return '"' + text.replace('"', '""') + '"' if any(c in text for c in ',"\n') else text
+
+
 def stream_coaching(report: dict, provider: str | None = None, model: str | None = None,
                     base_url: str | None = None) -> Iterator[str]:
     """Yield the coaching text as it streams in."""
+    messages = [{"role": "user", "content": build_prompt(report)}]
+    yield from stream_chat(SYSTEM_PROMPT, messages, provider, model, base_url)
+
+
+def stream_chat(system: str, messages: list[dict], provider: str | None = None,
+                model: str | None = None, base_url: str | None = None,
+                cache_context: bool = False) -> Iterator[str]:
+    """Yield the reply to a conversation of {"role": "user"|"assistant", "content": str}.
+
+    cache_context: the first message will be resent on later turns, so let providers that
+    support explicit prompt caching (Anthropic) cache it.
+    """
     provider, model, base_url = resolve(provider, model, base_url)
-    prompt = build_prompt(report)
     if provider == "anthropic":
-        yield from _stream_anthropic(model, prompt)
+        yield from _stream_anthropic(model, system, messages, cache_context)
     elif provider == "ollama":
-        yield from _stream_ollama(model, base_url, prompt)
+        yield from _stream_ollama(model, base_url, system, messages)
     else:
         key_env = OPENAI_COMPATIBLE[provider][1] if provider in OPENAI_COMPATIBLE else "CHESSCOACH_LLM_API_KEY"
-        yield from _stream_openai(provider, model, base_url, key_env, prompt)
+        yield from _stream_openai(provider, model, base_url, key_env, system, messages)
 
 
-def _stream_anthropic(model: str, prompt: str) -> Iterator[str]:
+def _stream_anthropic(model: str, system: str, messages: list[dict],
+                      cache_context: bool = False) -> Iterator[str]:
     try:
         import anthropic
     except ImportError:
@@ -129,10 +193,12 @@ def _stream_anthropic(model: str, prompt: str) -> Iterator[str]:
         # If a safety classifier declines, re-run server-side on Anthropic's recommended fallback.
         kwargs = {"output_config": {"effort": "medium"},
                   "betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+    if cache_context:
+        first = {"type": "text", "text": messages[0]["content"], "cache_control": {"type": "ephemeral"}}
+        messages = [{"role": messages[0]["role"], "content": [first]}, *messages[1:]]
     try:
         with anthropic.Anthropic().beta.messages.stream(
-            model=model, max_tokens=16000, system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}], **kwargs,
+            model=model, max_tokens=16000, system=system, messages=messages, **kwargs,
         ) as stream:
             yield from stream.text_stream
             final = stream.get_final_message()
@@ -153,7 +219,7 @@ def _stream_anthropic(model: str, prompt: str) -> Iterator[str]:
 
 
 def _stream_openai(provider: str, model: str, base_url: str | None, key_env: str | None,
-                   prompt: str) -> Iterator[str]:
+                   system: str, messages: list[dict]) -> Iterator[str]:
     try:
         import openai
     except ImportError:
@@ -170,8 +236,7 @@ def _stream_openai(provider: str, model: str, base_url: str | None, key_env: str
         client = openai.OpenAI(api_key=api_key, base_url=base_url)
         stream = client.chat.completions.create(
             model=model, stream=True,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT},
-                      {"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": system}, *messages],
         )
         wrote, finish = False, None
         for chunk in stream:
@@ -193,14 +258,23 @@ def _stream_openai(provider: str, model: str, base_url: str | None, key_env: str
         raise CoachError(_empty_reply_message(finish == "length"))
 
 
-def _stream_ollama(model: str, base_url: str, prompt: str) -> Iterator[str]:
+def ollama_num_ctx(system: str, messages: list[dict]) -> int:
+    """A context window big enough for the prompt (~3 chars/token for this JSON/CSV-heavy text)
+    plus room to answer, in powers of two from OLLAMA_NUM_CTX; bigger costs RAM, so no more."""
+    needed = (len(system) + sum(len(m["content"]) for m in messages)) // 3 + OLLAMA_REPLY_TOKENS
+    num_ctx = OLLAMA_NUM_CTX
+    while num_ctx < needed:
+        num_ctx *= 2
+    return num_ctx
+
+
+def _stream_ollama(model: str, base_url: str, system: str, messages: list[dict]) -> Iterator[str]:
     import requests
 
     try:
         resp = requests.post(f"{base_url.rstrip('/')}/api/chat", stream=True, timeout=(10, 600), json={
-            "model": model, "stream": True, "options": {"num_ctx": OLLAMA_NUM_CTX},
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                         {"role": "user", "content": prompt}],
+            "model": model, "stream": True, "options": {"num_ctx": ollama_num_ctx(system, messages)},
+            "messages": [{"role": "system", "content": system}, *messages],
         })
     except requests.ConnectionError:
         raise CoachError(f"Could not reach Ollama at {base_url}. Is `ollama serve` running?") from None

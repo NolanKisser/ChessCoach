@@ -5,10 +5,18 @@ LLM coaching layer later.
 """
 import sqlite3
 import statistics
+from datetime import datetime
 
 from . import motifs
 
 TIME_TROUBLE_SECONDS = 30
+SESSION_GAP_SECONDS = 30 * 60  # a longer break between games starts a new session
+DIGEST_GAMES = 200
+DIGEST_COLUMNS = (
+    "date", "weekday", "hour", "session_game", "time_class", "color", "user_rating",
+    "opponent_rating", "result", "opening", "moves", "acpl", "inaccuracies", "mistakes",
+    "blunders", "first_error_move", "min_clock", "low_clock_blunders", "url",
+)
 MOTIF_LABELS = {
     "hung_piece": "Hung a piece",
     "allowed_fork": "Allowed a fork",
@@ -198,6 +206,55 @@ def by_motif(conn: sqlite3.Connection) -> list[dict]:
             },
         })
     return sorted(out, key=lambda m: -m["count"])
+
+
+def session_numbers(played_at: list[int | None], gap: int = SESSION_GAP_SECONDS) -> list[int | None]:
+    """Each game's position in its playing session (1 = first game), for timestamps in
+    chronological order. A new session starts after `gap` seconds without a game."""
+    out, prev, n = [], None, 0
+    for t in played_at:
+        if t is None:
+            out.append(None)
+            continue
+        n = n + 1 if prev is not None and t - prev <= gap else 1
+        out.append(n)
+        prev = t
+    return out
+
+
+def game_digest(conn: sqlite3.Connection, limit: int = DIGEST_GAMES) -> list[dict]:
+    """One row per analyzed game (most recent `limit`), oldest first, for habit questions the
+    aggregates can't answer: time of day, sessions/tilt, rating gaps, time controls."""
+    rows = conn.execute("""
+        SELECT g.url, g.played_at, g.time_class, g.user_color AS color, g.user_rating,
+               g.opponent_rating, g.result, g.opening,
+               (MAX(m.ply) + 1) / 2 AS moves,
+               AVG(CASE WHEN m.is_user = 1 THEN m.cp_loss END) AS acpl,
+               SUM(m.is_user = 1 AND m.classification = 'inaccuracy') AS inaccuracies,
+               SUM(m.is_user = 1 AND m.classification = 'mistake') AS mistakes,
+               SUM(m.is_user = 1 AND m.classification = 'blunder') AS blunders,
+               MIN(CASE WHEN m.is_user = 1 AND m.classification IN ('mistake', 'blunder')
+                        THEN m.ply END) AS first_error_ply,
+               MIN(CASE WHEN m.is_user = 1 THEN m.clock END) AS min_clock,
+               SUM(m.is_user = 1 AND m.classification = 'blunder' AND m.clock < ?) AS low_clock_blunders
+        FROM games g JOIN moves m ON m.game_id = g.id
+        WHERE g.analyzed_depth IS NOT NULL
+        GROUP BY g.id ORDER BY g.played_at DESC LIMIT ?
+    """, (TIME_TROUBLE_SECONDS, limit)).fetchall()
+    rows = [dict(r) for r in reversed(rows)]
+    for r, session_game in zip(rows, session_numbers([r["played_at"] for r in rows])):
+        played, ply = r.pop("played_at"), r.pop("first_error_ply")
+        when = datetime.fromtimestamp(played) if played is not None else None  # local time
+        r.update({
+            "date": when.strftime("%Y-%m-%d") if when else None,
+            "weekday": when.strftime("%a") if when else None,
+            "hour": when.hour if when else None,
+            "session_game": session_game,
+            "acpl": round(r["acpl"], 1) if r["acpl"] is not None else None,
+            "first_error_move": (ply + 1) // 2 if ply else None,
+            "min_clock": round(r["min_clock"]) if r["min_clock"] is not None else None,
+        })
+    return [{c: r[c] for c in DIGEST_COLUMNS} for r in rows]
 
 
 def build_report(conn: sqlite3.Connection) -> dict:

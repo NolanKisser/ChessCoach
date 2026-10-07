@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from chesscoach.coach import CoachError, build_prompt, resolve
+from chesscoach.coach import CoachError, build_ask_context, build_prompt, ollama_num_ctx, resolve
 
 
 @pytest.fixture(autouse=True)
@@ -44,3 +44,20 @@ def test_build_prompt_trims_openings():
     data = json.loads(prompt.split("```json\n")[1].split("\n```")[0])
     assert [o["opening"] for o in data["openings"]] == ["0", "1", "2"]
     assert len(report["openings"]) == 20  # input not mutated
+
+
+def test_build_ask_context_has_report_and_csv_table():
+    report = {"overview": {"games": 2}, "openings": [{"opening": str(i)} for i in range(20)]}
+    games = [{"url": "u/a", "opening": "Sicilian, Najdorf", "acpl": None},
+             {"url": "u/b", "opening": 'The "Fried Liver"', "acpl": 31.5}]
+    ctx = build_ask_context(report, games, top_openings=2)
+    data = json.loads(ctx.split("```json\n")[1].split("\n```")[0])
+    assert len(data["openings"]) == 2
+    table = ctx.split("```csv\n")[1].split("\n```")[0].splitlines()
+    assert table == ["url,opening,acpl", 'u/a,"Sicilian, Najdorf",', 'u/b,"The ""Fried Liver""",31.5']
+
+
+def test_ollama_num_ctx_grows_to_fit_in_powers_of_two():
+    assert ollama_num_ctx("s", [{"role": "user", "content": "hi"}]) == 16384
+    big = [{"role": "user", "content": "x" * 3 * 20000}]  # ~20k tokens + reply room
+    assert ollama_num_ctx("", big) == 32768
