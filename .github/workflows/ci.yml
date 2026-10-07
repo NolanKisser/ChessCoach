@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff check chesscoach tests
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported (README: 3.10+) through newest on Linux; Windows and macOS on one.
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+    env:
+      # Keep the smoke tests' database out of the checkout.
+      CHESSCOACH_DATA: ${{ github.workspace }}/../ci-data
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+
+      # The CLI end to end on an empty database: no network, Stockfish or API keys needed.
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          set -e
+          python -m chesscoach --help > /dev/null
+          for cmd in fetch analyze report coach ask; do python -m chesscoach $cmd --help > /dev/null; done
+          python -m chesscoach report
+          python -m chesscoach report --json | python -c "import json, sys; json.load(sys.stdin)"
+          python -m chesscoach coach
+          python -m chesscoach ask "smoke test"

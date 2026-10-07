@@ -20,7 +20,7 @@ python -m chesscoach coach [--provider anthropic|ollama|openai|gemini|... --mode
 python -m chesscoach ask ["question"] [--games 200 + same LLM flags]   # no question = interactive chat
 ```
 
-No linter/formatter is configured. Tests are pure unit tests (no network, no Stockfish) — keep them that way by testing the normalize/classify helpers rather than the fetch/engine paths.
+Lint: `uvx ruff check chesscoach tests` (`ruff.toml`: bug-finding rules E9/F/B only, no formatter or style rules). CI (`.github/workflows/ci.yml`) runs ruff, pytest on py3.10/3.12/3.14 Linux + 3.12 Windows/macOS, and a CLI smoke test on an empty DB (`coach`/`ask` exit before any LLM call when no games are analyzed) — keep that true, and keep 3.10 syntax. Tests are pure unit tests (no network, no Stockfish) — keep them that way by testing the normalize/classify helpers rather than the fetch/engine paths.
 
 ## Environment variables
 

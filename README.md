@@ -117,9 +117,12 @@ mistake lands, so an opening you misplay on move 5 comes before one you misplay 
 
 ```bash
 python -m pytest
+uvx ruff check chesscoach tests   # or: pip install ruff && ruff check chesscoach tests
 ```
 
-Tests are pure unit tests — no network or Stockfish required. Issues and pull requests welcome.
+Tests are pure unit tests — no network or Stockfish required. CI (GitHub Actions) runs ruff, the
+tests on Python 3.10–3.14 across Linux, Windows and macOS, and a CLI smoke test on every push and
+pull request. Issues and pull requests welcome.
 
 ## Roadmap
 
