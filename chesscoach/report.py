@@ -5,8 +5,32 @@ LLM coaching layer later.
 """
 import sqlite3
 import statistics
+from datetime import datetime
+
+from . import motifs
 
 TIME_TROUBLE_SECONDS = 30
+SESSION_GAP_SECONDS = 30 * 60  # a longer break between games starts a new session
+DIGEST_GAMES = 200
+DIGEST_COLUMNS = (
+    "date", "weekday", "hour", "session_game", "time_class", "color", "user_rating",
+    "opponent_rating", "result", "opening", "moves", "acpl", "inaccuracies", "mistakes",
+    "blunders", "first_error_move", "min_clock", "low_clock_blunders", "url",
+)
+MOTIF_LABELS = {
+    "hung_piece": "Hung a piece",
+    "allowed_fork": "Allowed a fork",
+    "missed_capture": "Missed winning a piece",
+    "missed_fork": "Missed a fork",
+    "back_rank": "Allowed back-rank mate",
+}
+
+
+def motif_label(tag: str) -> str:
+    for prefix, label in (("missed_mate_in_", "Missed mate in "), ("allowed_mate_in_", "Allowed mate in ")):
+        if tag.startswith(prefix):
+            return label + tag[len(prefix):]
+    return MOTIF_LABELS.get(tag, tag)
 MIN_OPENING_GAMES = 3
 # A first big error this many moves later counts half as much toward an opening's priority.
 EARLY_ERROR_HALF_LIFE = 8
@@ -135,12 +159,111 @@ def worst_moments(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
     return [{**dict(r), "move_number": (r["ply"] + 1) // 2} for r in rows]
 
 
+def by_motif(conn: sqlite3.Connection) -> list[dict]:
+    """Tactical motifs behind the user's mistakes and blunders (plus missed/allowed short mates
+    on any move), most frequent first."""
+    rows = conn.execute("""
+        SELECT m.ply, m.san, m.best_san, m.fen_before, m.win_drop, m.classification, m.mate,
+               n.best_san AS reply_san, n.mate AS reply_mate, n.mate_pv AS reply_mate_pv,
+               g.url, g.user_color
+        FROM moves m
+        JOIN games g ON g.id = m.game_id
+        LEFT JOIN moves n ON n.game_id = m.game_id AND n.ply = m.ply + 1
+        WHERE m.is_user = 1 AND (m.classification IN ('mistake', 'blunder')
+              OR m.mate IS NOT NULL OR n.mate IS NOT NULL
+              OR m.best_san LIKE '%#' OR n.best_san LIKE '%#')
+    """).fetchall()
+    games = conn.execute("SELECT COUNT(*) FROM games WHERE analyzed_depth IS NOT NULL").fetchone()[0]
+
+    stats: dict[str, dict] = {}
+    for r in rows:
+        sign = 1 if r["user_color"] == "white" else -1
+        tags = motifs.tag_error(
+            r["fen_before"], r["san"], r["best_san"], r["reply_san"],
+            mate_before=r["mate"] * sign if r["mate"] is not None else None,
+            mate_after=r["reply_mate"] * sign if r["reply_mate"] is not None else None,
+            reply_mate_pv=r["reply_mate_pv"],
+            is_error=r["classification"] in ("mistake", "blunder"),
+        )
+        for tag in tags:
+            s = stats.setdefault(tag, {"count": 0, "drop": 0.0, "worst": r})
+            s["count"] += 1
+            s["drop"] += r["win_drop"]
+            if r["win_drop"] > s["worst"]["win_drop"]:
+                s["worst"] = r
+
+    out = []
+    for tag, s in stats.items():
+        w = s["worst"]
+        out.append({
+            "motif": tag, "count": s["count"],
+            "per_100_games": _rate(s["count"], games),
+            "avg_win_drop": round(s["drop"] / s["count"], 1),
+            "worst_example": {
+                "move_number": (w["ply"] + 1) // 2, "user_color": w["user_color"], "san": w["san"],
+                "best_san": w["best_san"], "opponent_best_reply": w["reply_san"],
+                "win_drop": w["win_drop"], "fen_before": w["fen_before"], "url": w["url"],
+            },
+        })
+    return sorted(out, key=lambda m: -m["count"])
+
+
+def session_numbers(played_at: list[int | None], gap: int = SESSION_GAP_SECONDS) -> list[int | None]:
+    """Each game's position in its playing session (1 = first game), for timestamps in
+    chronological order. A new session starts after `gap` seconds without a game."""
+    out, prev, n = [], None, 0
+    for t in played_at:
+        if t is None:
+            out.append(None)
+            continue
+        n = n + 1 if prev is not None and t - prev <= gap else 1
+        out.append(n)
+        prev = t
+    return out
+
+
+def game_digest(conn: sqlite3.Connection, limit: int = DIGEST_GAMES) -> list[dict]:
+    """One row per analyzed game (most recent `limit`), oldest first, for habit questions the
+    aggregates can't answer: time of day, sessions/tilt, rating gaps, time controls."""
+    rows = conn.execute("""
+        SELECT g.url, g.played_at, g.time_class, g.user_color AS color, g.user_rating,
+               g.opponent_rating, g.result, g.opening,
+               (MAX(m.ply) + 1) / 2 AS moves,
+               AVG(CASE WHEN m.is_user = 1 THEN m.cp_loss END) AS acpl,
+               SUM(m.is_user = 1 AND m.classification = 'inaccuracy') AS inaccuracies,
+               SUM(m.is_user = 1 AND m.classification = 'mistake') AS mistakes,
+               SUM(m.is_user = 1 AND m.classification = 'blunder') AS blunders,
+               MIN(CASE WHEN m.is_user = 1 AND m.classification IN ('mistake', 'blunder')
+                        THEN m.ply END) AS first_error_ply,
+               MIN(CASE WHEN m.is_user = 1 THEN m.clock END) AS min_clock,
+               SUM(m.is_user = 1 AND m.classification = 'blunder' AND m.clock < ?) AS low_clock_blunders
+        FROM games g JOIN moves m ON m.game_id = g.id
+        WHERE g.analyzed_depth IS NOT NULL
+        GROUP BY g.id ORDER BY g.played_at DESC LIMIT ?
+    """, (TIME_TROUBLE_SECONDS, limit)).fetchall()
+    rows = [dict(r) for r in reversed(rows)]
+    for r, session_game in zip(rows, session_numbers([r["played_at"] for r in rows])):
+        played, ply = r.pop("played_at"), r.pop("first_error_ply")
+        when = datetime.fromtimestamp(played) if played is not None else None  # local time
+        r.update({
+            "date": when.strftime("%Y-%m-%d") if when else None,
+            "weekday": when.strftime("%a") if when else None,
+            "hour": when.hour if when else None,
+            "session_game": session_game,
+            "acpl": round(r["acpl"], 1) if r["acpl"] is not None else None,
+            "first_error_move": (ply + 1) // 2 if ply else None,
+            "min_clock": round(r["min_clock"]) if r["min_clock"] is not None else None,
+        })
+    return [{c: r[c] for c in DIGEST_COLUMNS} for r in rows]
+
+
 def build_report(conn: sqlite3.Connection) -> dict:
     return {
         "overview": overview(conn),
         "phases": by_phase(conn),
         "openings": by_opening(conn),
         "time_trouble": time_trouble(conn),
+        "motifs": by_motif(conn),
         "worst_moments": worst_moments(conn),
     }
 
@@ -166,6 +289,13 @@ def format_report(report: dict) -> str:
                      + (f"  (first big error ~move {first})" if first else ""))
     if not report["openings"]:
         lines.append("  (not enough games per opening yet)")
+
+    lines += ["", "Tactical motifs (mates: any move; others: mistakes/blunders only):"]
+    for m in report["motifs"]:
+        lines.append(f"  {motif_label(m['motif']):<26} {m['count']:>4}  "
+                     f"({m['per_100_games']} per 100 games)")
+    if not report["motifs"]:
+        lines.append("  (none found)")
 
     tt = report["time_trouble"]
     if tt:

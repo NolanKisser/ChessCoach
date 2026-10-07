@@ -63,3 +63,10 @@ def test_normalize_lichess_draw_and_skips_variants():
     assert game["result"] == "draw"
     assert game["opening"] == "King's Pawn Game"
     assert normalize_lichess({**g, "variant": "chess960"}, "me") is None
+
+
+def test_mate_line_stops_at_checkmate():
+    from chesscoach.analyze import mate_line
+    board = chess.Board("3qr1k1/p4ppp/8/8/8/8/4RPPP/4R1K1 w - - 0 1")
+    pv = [chess.Move.from_uci(u) for u in ("e2e8", "d8e8", "e1e8", "g8f8")]  # trailing junk
+    assert mate_line(board, pv) == "e2e8 d8e8 e1e8"
